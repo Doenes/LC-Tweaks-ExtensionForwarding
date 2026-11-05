@@ -24,7 +24,8 @@
 // Limits: only extensions the guest starts itself through NSExtension. All of
 // them run on LiveProcess's extension point (com.apple.ar.viewer). Storyboard
 // based extensions (NSExtensionMainStoryboard) are not supported. The appex
-// executable must be dlopen-able: run patch_appex.py on the IPA first. The
+// executable must be dlopen-able: LCExtForwardHost.dylib converts it when
+// LiveContainer signs the app (or run patch_appex.py on the IPA first). The
 // LiveProcess side runs without JIT, so this dylib and the appex must be signed
 // with LiveContainer's certificate even when the guest app itself uses JIT.
 
@@ -136,6 +137,83 @@ static NSString *LCEFPayloadPath(NSString *selfPath) {
     return dest;
 }
 
+/// Gecko apps start several child processes at once, possibly from different
+/// threads. All staging goes through this lock so two requests never copy into
+/// the same place at the same time.
+static NSObject *LCEFStageLock(void) {
+    static NSObject *lock;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ lock = [NSObject new]; });
+    return lock;
+}
+
+/// Copies `src` to `dest` through `<dest>.partial` and a rename, so `dest` is
+/// either the old copy, missing, or complete — never half-written (e.g. when the
+/// app is killed during a long Frameworks copy).
+static BOOL LCEFCopyReplacing(NSString *src, NSString *dest, NSError **error) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *partial = [dest stringByAppendingString:@".partial"];
+    [fm removeItemAtPath:partial error:nil];
+    if (![fm copyItemAtPath:src toPath:partial error:error]) {
+        [fm removeItemAtPath:partial error:nil];
+        return NO;
+    }
+    [fm removeItemAtPath:dest error:nil];   // a still-running LiveProcess keeps its mapped files
+    if (![fm moveItemAtPath:partial toPath:dest error:error]) {
+        [fm removeItemAtPath:partial error:nil];
+        return NO;
+    }
+    return YES;
+}
+
+/// Fingerprint of the guest's Frameworks: name, size and mtime of each entry's
+/// binary. The folder's own mtime is not enough — re-signing rewrites XUL &
+/// co. in place and leaves the folder's mtime unchanged.
+static NSString *LCEFFrameworksStamp(NSString *dir) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSMutableString *stamp = [NSMutableString string];
+    NSArray *names = [[fm contentsOfDirectoryAtPath:dir error:nil] sortedArrayUsingSelector:@selector(compare:)];
+    for (NSString *name in names) {
+        NSString *path = [dir stringByAppendingPathComponent:name];
+        NSString *binary = path;
+        if ([name.pathExtension isEqualToString:@"framework"]) {
+            NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:[path stringByAppendingPathComponent:@"Info.plist"]];
+            NSString *exec = [info[@"CFBundleExecutable"] isKindOfClass:NSString.class] ? info[@"CFBundleExecutable"]
+                                                                                        : name.stringByDeletingPathExtension;
+            binary = [path stringByAppendingPathComponent:exec];
+        }
+        NSDictionary *attrs = [fm attributesOfItemAtPath:binary error:nil] ?: [fm attributesOfItemAtPath:path error:nil];
+        [stamp appendFormat:@"%@ %llu %.0f\n", name, attrs.fileSize, attrs.fileModificationDate.timeIntervalSince1970];
+    }
+    return stamp;
+}
+
+/// One-time, idempotent copy of the guest app's Frameworks into the staging
+/// root, so the helper's `@rpath/../../Frameworks` (XUL, GeckoView.framework, …)
+/// resolves to a location LiveProcess may executably map (the app group). Keyed
+/// on LCEFFrameworksStamp, so it recopies only after an app update/re-sign.
+static void LCEFStageFrameworks(NSString *guestFrameworks, NSString *root) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    BOOL isDir = NO;
+    if (![fm fileExistsAtPath:guestFrameworks isDirectory:&isDir] || !isDir) return;
+    NSString *dest = [root stringByAppendingPathComponent:@"Frameworks"];
+    NSString *stampFile = [root stringByAppendingPathComponent:@".fwstamp"];
+    NSString *stamp = LCEFFrameworksStamp(guestFrameworks);
+    NSString *have = [NSString stringWithContentsOfFile:stampFile encoding:NSUTF8StringEncoding error:nil];
+    if ([have isEqualToString:stamp] && [fm fileExistsAtPath:dest]) return;   // already staged this version
+
+    // Invalidate first: if the copy is interrupted, the next start copies again.
+    [fm removeItemAtPath:stampFile error:nil];
+    [fm createDirectoryAtPath:root withIntermediateDirectories:YES attributes:nil error:nil];
+    NSError *error = nil;
+    if (!LCEFCopyReplacing(guestFrameworks, dest, &error)) {
+        LOG(@"staging Frameworks failed: %@", error);
+        return;
+    }
+    [stamp writeToFile:stampFile atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    LOG(@"staged Frameworks (%lu entries) to %@", (unsigned long)[stamp componentsSeparatedByString:@"\n"].count - 1, dest);
+}
+
 /// Same problem as the dylib, for the appex: the guest's Documents folder lets
 /// LiveProcess read the appex but not map it as executable code (the sandbox
 /// blocks mmap(PROT_EXEC) there). The app group allows it — that is where the
@@ -144,36 +222,19 @@ static NSString *LCEFPayloadPath(NSString *selfPath) {
 /// signature on each Mach-O is part of the file, so copying preserves it.
 /// Returns the staged appex path, or the original on failure (so the loader's
 /// own error still shows the real reason).
-/// One-time, idempotent copy of the guest app's Frameworks into the staging
-/// root, so the helper's `@rpath/../../Frameworks` (XUL, GeckoView.framework, …)
-/// resolves to a location LiveProcess may executably map (the app group). Keyed
-/// on the source Frameworks mtime, so it recopies only after an app update/re-sign.
-static void LCEFStageFrameworks(NSString *guestFrameworks, NSString *root) {
-    NSFileManager *fm = NSFileManager.defaultManager;
-    BOOL isDir = NO;
-    if (![fm fileExistsAtPath:guestFrameworks isDirectory:&isDir] || !isDir) return;
-    NSString *dest = [root stringByAppendingPathComponent:@"Frameworks"];
-    NSString *stampFile = [root stringByAppendingPathComponent:@".fwstamp"];
-    NSDate *mtime = [fm attributesOfItemAtPath:guestFrameworks error:nil].fileModificationDate;
-    NSString *stamp = [NSString stringWithFormat:@"%.0f", mtime.timeIntervalSince1970];
-    NSString *have = [NSString stringWithContentsOfFile:stampFile encoding:NSUTF8StringEncoding error:nil];
-    if ([have isEqualToString:stamp] && [fm fileExistsAtPath:dest]) return;   // already staged this version
-
-    [fm removeItemAtPath:dest error:nil];
-    NSError *error = nil;
-    if (![fm copyItemAtPath:guestFrameworks toPath:dest error:&error]) {
-        LOG(@"staging Frameworks failed: %@", error);
-        return;
-    }
-    [stamp writeToFile:stampFile atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    LOG(@"staged Frameworks (%@) to %@", mtime, dest);
-}
-
+///
 /// Stage the appex into a minimal bundle layout in the app group:
 ///   <root>/PlugIns/<name>.appex   and   <root>/Frameworks/
 /// so that the helper's `@rpath/../../Frameworks` resolves next to it. Self-
 /// contained helpers (Madeira) simply have no Frameworks to stage.
+static NSString *LCEFStageAppexLocked(NSString *appexPath);
 static NSString *LCEFStageAppex(NSString *appexPath) {
+    @synchronized (LCEFStageLock()) {
+        return LCEFStageAppexLocked(appexPath);
+    }
+}
+
+static NSString *LCEFStageAppexLocked(NSString *appexPath) {
     NSString *group = LCEFAppGroupPath();
     if (!group || !appexPath) return appexPath;
     if ([appexPath hasPrefix:group]) return appexPath;
@@ -199,9 +260,8 @@ static NSString *LCEFStageAppex(NSString *appexPath) {
         return dest;
 
     [fm createDirectoryAtPath:plugIns withIntermediateDirectories:YES attributes:nil error:nil];
-    [fm removeItemAtPath:dest error:nil];
     NSError *error = nil;
-    if (![fm copyItemAtPath:appexPath toPath:dest error:&error]) {
+    if (!LCEFCopyReplacing(appexPath, dest, &error)) {
         LOG(@"staging the appex to the app group failed: %@", error);
         return appexPath;
     }
@@ -214,7 +274,9 @@ static NSString *LCEFStageAppex(NSString *appexPath) {
 static NSArray<NSData *> *LCEFBookmarks(void) {
     NSMutableArray *bookmarks = [NSMutableArray array];
     const char *home = getenv("HOME");
-    NSMutableArray<NSURL *> *urls = [NSMutableArray arrayWithObject:[NSURL fileURLWithPath:LCEFGuestAppPath()]];
+    NSMutableArray<NSURL *> *urls = [NSMutableArray array];
+    NSString *appPath = LCEFGuestAppPath();
+    if (appPath) [urls addObject:[NSURL fileURLWithPath:appPath]];
     if (home) [urls addObject:[NSURL fileURLWithPath:@(home)]];
     for (NSURL *url in urls) {
         NSError *error = nil;
@@ -394,7 +456,9 @@ static id hook_extensionWithIdentifier(id self, SEL _cmd, NSString *identifier, 
             LCEFPlugInsPath(), [NSFileManager.defaultManager contentsOfDirectoryAtPath:LCEFPlugInsPath() error:nil]);
         return nil;
     }
-    if (!gPayloadPath) gPayloadPath = LCEFPayloadPath(gSelfPath);
+    @synchronized (LCEFStageLock()) {
+        if (!gPayloadPath) gPayloadPath = LCEFPayloadPath(gSelfPath);
+    }
     if (!gPayloadPath) {
         LOG(@"%@: no copy of the dylib in the app group (app group %@), cannot forward", identifier, LCEFAppGroupPath());
         return nil;

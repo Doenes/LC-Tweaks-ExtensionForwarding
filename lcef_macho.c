@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <sys/stat.h>
 
 void (*lcef_macho_log)(const char *msg) = 0;
 static void LOGF(const char *fmt, const char *a) {
@@ -74,7 +75,7 @@ int lcef_patch_slice(uint8_t *buf, size_t len, uint32_t off, const char *name) {
         else if (c->cmd == LC_LOAD_DYLINKER) { dyld_off = (uint32_t)(p - buf); dyld_sz = c->cmdsize; }
         else if (c->cmd == LC_RPATH) {
             rpathc *r = (rpathc *)p;
-            if (r->path_off < c->cmdsize && strncmp((char *)p + r->path_off, RPATHSTR, c->cmdsize) == 0) has_rpath = 1;
+            if (r->path_off < c->cmdsize && strncmp((char *)p + r->path_off, RPATHSTR, c->cmdsize - r->path_off) == 0) has_rpath = 1;
         }
         p += c->cmdsize;
     }
@@ -128,7 +129,7 @@ int lcef_patch_file(const char *path) {
     if (fread(buf, 1, n, f) != (size_t)n) { free(buf); fclose(f); return 0; }
     fclose(f);
 
-    int changed = 0;
+    int changed = 0, failed = 0;
     uint32_t magic_be = *(uint32_t *)buf;
     uint32_t magic = bswap32(magic_be);  // fat header is big-endian
     const char *base = strrchr(path, '/'); base = base ? base + 1 : path;
@@ -147,19 +148,33 @@ int lcef_patch_file(const char *path) {
                 if ((uint8_t *)(a + 1) > buf + n) break;
                 cputype = bswap32(a->cputype); off = bswap32(a->offset);
             }
-            if (cputype == CPU_ARM64 && off < (uint64_t)n)
-                if (lcef_patch_slice(buf, n, (uint32_t)off, base) == 0) changed = 1;
+            if (cputype == CPU_ARM64 && off < (uint64_t)n) {
+                int r = lcef_patch_slice(buf, n, (uint32_t)off, base);
+                if (r == 0) changed = 1; else if (r < 0) failed = 1;
+            }
         }
     } else if (*(uint32_t *)buf == MH_MAGIC_64) {
-        if (lcef_patch_slice(buf, n, 0, base) == 0) changed = 1;
+        int r = lcef_patch_slice(buf, n, 0, base);
+        if (r == 0) changed = 1; else if (r < 0) failed = 1;
     }
 
+    // A slice that failed may be half-modified: then leave the whole file untouched.
+    if (failed) { LOGF("%s: conversion failed, file left unchanged", base); free(buf); return 0; }
     if (changed) {
-        FILE *w = fopen(path, "wb");
+        // Write next to the original and rename over it, so an interrupted write
+        // never leaves a truncated binary behind. Keep the original permissions.
+        struct stat st; mode_t mode = stat(path, &st) == 0 ? (st.st_mode & 07777) : 0755;
+        char tmp[1024];
+        if (snprintf(tmp, sizeof(tmp), "%s.lcef-tmp", path) >= (int)sizeof(tmp)) { free(buf); return 0; }
+        FILE *w = fopen(tmp, "wb");
         if (!w) { free(buf); return 0; }
-        size_t wrote = fwrite(buf, 1, n, w); fclose(w);
+        size_t wrote = fwrite(buf, 1, n, w);
+        int closed = fclose(w);
         free(buf);
-        return wrote == (size_t)n;
+        if (wrote != (size_t)n || closed != 0) { remove(tmp); return 0; }
+        chmod(tmp, mode);
+        if (rename(tmp, path) != 0) { remove(tmp); return 0; }
+        return 1;
     }
     free(buf);
     return 0;

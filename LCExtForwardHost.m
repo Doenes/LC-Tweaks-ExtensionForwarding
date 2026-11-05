@@ -76,10 +76,19 @@ static BOOL LCEFShouldConvert(NSURL *bundleURL) {
     NSString *bid = info[@"CFBundleIdentifier"];
     if (![bid isKindOfClass:NSString.class]) bid = nil;
     for (NSString *want in gOptIn) {
-        // Tolerate a stray ".app" on the entry (e.g. "com.foo.Bar.app" for id "com.foo.Bar").
-        NSString *w = [want hasSuffix:@".app"] ? [want substringToIndex:want.length - 4] : want;
-        if ([w isEqualToString:appName]) return YES;
-        if (bid && ([w isEqualToString:bid] || [bid hasSuffix:w])) return YES;
+        // Try the entry as written AND without a trailing ".app": the ".app" may be
+        // a stray bundle extension ("Reynard.app") or part of the bundle ID itself
+        // ("com.willfaust.madeora.app") — stripping it unconditionally broke the latter.
+        NSString *stripped = [want hasSuffix:@".app"] ? [want substringToIndex:want.length - 4] : want;
+        for (NSString *w in @[want, stripped]) {
+            if (!w.length) continue;
+            if ([w caseInsensitiveCompare:appName] == NSOrderedSame) return YES;
+            if (!bid) continue;
+            if ([w isEqualToString:bid]) return YES;
+            // Last components of the ID ("Reynard" for "com.minh-ton.Reynard"), only on a
+            // dot boundary so short entries do not match unrelated apps.
+            if ([bid hasSuffix:[@"." stringByAppendingString:w]]) return YES;
+        }
     }
     return NO;
 }

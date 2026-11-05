@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build log variant
+        run: |
+          make clean
+          make LCExtForward.dylib LOG=1
+          mv LCExtForward.dylib LCExtForward-log.dylib
+
+      - name: Build silent dylibs
+        run: |
+          make LCExtForward.dylib LCExtForwardHost.dylib LOG=0
+
+      - name: Package
+        run: |
+          mkdir -p dist/LCExtForward
+          cp LCExtForward.dylib LCExtForward-log.dylib LCExtForwardHost.dylib LCExtForward.apps SETUP.md dist/LCExtForward/
+          (cd dist && zip -r LCExtForward.zip LCExtForward)
+          cp dist/LCExtForward/* dist/
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            Fertige Tweaks für LiveContainer (arm64, iOS 16+). Einrichtung siehe `SETUP.md`.
+
+            - `LCExtForward.dylib` – per-App-Tweak (still)
+            - `LCExtForward-log.dylib` – per-App-Tweak mit Logging (Fehlersuche)
+            - `LCExtForwardHost.dylib` – Host-Tweak (globaler Tweak-Ordner)
+            - `LCExtForward.apps` – Opt-in-Liste für den Host-Tweak
+            - `LCExtForward.zip` – alles zusammen
+          files: |
+            dist/LCExtForward.dylib
+            dist/LCExtForward-log.dylib
+            dist/LCExtForwardHost.dylib
+            dist/LCExtForward.apps
+            dist/SETUP.md
+            dist/LCExtForward.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LCExtForward
+          path: dist/LCExtForward.zip

@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release-Tag (z. B. v1.0.0)'
+        description: 'Release tag (e.g. v1.0.0)'
         required: true
         default: 'v1.0.0'
 
@@ -50,13 +50,13 @@ jobs:
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
           body: |
-            Fertige Tweaks für LiveContainer (arm64, iOS 16+). Einrichtung siehe `SETUP.md`.
+            Prebuilt tweaks for LiveContainer (arm64, iOS 16+). See `SETUP.md` for setup.
 
-            - `LCExtForward.dylib` – per-App-Tweak (still)
-            - `LCExtForward-log.dylib` – per-App-Tweak mit Logging (Fehlersuche)
-            - `LCExtForwardHost.dylib` – Host-Tweak (globaler Tweak-Ordner)
-            - `LCExtForward.apps` – Opt-in-Liste für den Host-Tweak
-            - `LCExtForward.zip` – alles zusammen
+            - `LCExtForward.dylib` – per-app tweak (silent)
+            - `LCExtForward-log.dylib` – per-app tweak with logging (troubleshooting)
+            - `LCExtForwardHost.dylib` – host tweak (global tweak folder)
+            - `LCExtForward.apps` – opt-in list for the host tweak
+            - `LCExtForward.zip` – everything in one archive
           files: |
             dist/LCExtForward.dylib
             dist/LCExtForward-log.dylib

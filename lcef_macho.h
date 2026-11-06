@@ -1,6 +1,6 @@
 // Self-contained MH_EXECUTE -> MH_DYLIB conversion for app-extension binaries,
 // so LiveProcess can dlopen them. Same transform as patch_appex.py, but run at
-// LiveContainer's sign time (see LCExtForwardHost.m). No Apple SDK headers, so
+// LiveContainer's sign time (see the host role in LCExtForward.m). No Apple SDK headers, so
 // the identical code compiles into the iOS dylib and into a native test tool.
 #ifndef LCEF_MACHO_H
 #define LCEF_MACHO_H

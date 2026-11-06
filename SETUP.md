@@ -44,7 +44,9 @@ Widgets, share, keyboard and notification extensions do not work (iOS launches t
    ```
    com.willfaust.madeora.app
    com.minh-ton.Reynard
+   com.stossy11.MeloNX
    ```
+   These three (Madeira, Reynard, MeloNX) are already in the shipped file.
    `*` on a line = all apps. Empty file = nothing is touched.
 6. **Import** the IPA into LiveContainer as usual (no `patch_appex.py` needed), if not done yet.
 7. **Re-sign** the app in LiveContainer **once**. The tweak converts its appex(es) during this step.

@@ -1,177 +1,178 @@
 # LCExtForward
 
-Tweak für [LiveContainer](https://github.com/LiveContainer/LiveContainer), mit dem Guest-Apps
-ihre **eigenen privaten App-Extensions** starten können, die im Container sonst fehlen –
-z. B. Madeiras Memory-Host oder Reynards Gecko-Kindprozesse. Die Extension läuft dann in
-LiveContainers `LiveProcess.appex`.
+A tweak for [LiveContainer](https://github.com/LiveContainer/LiveContainer) that lets guest apps
+start their **own private app extensions**, which are otherwise missing inside the container –
+e.g. Madeira's memory host or Reynard's Gecko child processes. The extension then runs inside
+LiveContainer's `LiveProcess.appex`.
 
-> Gilt nur für Extensions, die die App **selbst** über `NSExtension` startet (Helfer-Prozesse).
-> Widgets, Share-, Keyboard- und Notification-Extensions gehen nicht – die startet iOS.
+> This only works for extensions the app starts **itself** via `NSExtension` (helper processes).
+> Widgets, share, keyboard and notification extensions do not work – those are launched by iOS.
 
 ## Download
 
-Die fertigen Tweaks gibt es unter **[Releases](../../releases/latest)** (arm64, iOS 16+):
+Prebuilt tweaks are available under **[Releases](../../releases/latest)** (arm64, iOS 16+):
 
-| Datei | Zweck |
+| File | Purpose |
 |---|---|
-| `LCExtForward.dylib` | Per-App-Tweak: Hook in der App + Payload in LiveProcess |
-| `LCExtForward-log.dylib` | Wie oben, mit Logging (nur zur Fehlersuche) |
-| `LCExtForwardHost.dylib` | Host-Tweak: wandelt Appexes beim Signieren um |
-| `LCExtForward.apps` | Opt-in-Liste: welche Apps der Host-Tweak behandelt |
-| `LCExtForward.zip` | Alles zusammen |
+| `LCExtForward.dylib` | Per-app tweak: hook in the app + payload in LiveProcess |
+| `LCExtForward-log.dylib` | Same as above, with logging (for troubleshooting only) |
+| `LCExtForwardHost.dylib` | Host tweak: converts appexes while signing |
+| `LCExtForward.apps` | Opt-in list: which apps the host tweak handles |
+| `LCExtForward.zip` | Everything in one archive |
 
 ---
 
-## Einrichtung
+## Setup
 
-### Voraussetzungen
+### Requirements
 
-- **LiveContainer mit „Keep App Extensions" sideloaden** (Branch `bypass-mem-poc` oder neuer).
-  Bei SideStore beim Installieren „Keep App Extensions (Use Main Profile)" wählen.
-  Nur so existiert `LiveProcess.appex`.
-- In LiveContainer ist ein **Signatur-Zertifikat eingerichtet**. Bei jeder betroffenen App
-  muss **„Don't Sign" AUS** sein. Das gilt **auch mit JIT**, weil die Extension in einem
-  separaten, JIT-losen Prozess läuft.
+- **Sideload LiveContainer with "Keep App Extensions"** (branch `bypass-mem-poc` or newer).
+  With SideStore, choose "Keep App Extensions (Use Main Profile)" when installing.
+  Only then does `LiveProcess.appex` exist.
+- A **signing certificate is set up** in LiveContainer. For every affected app,
+  **"Don't Sign" must be OFF**. This applies **even with JIT**, because the extension runs
+  in a separate process without JIT.
 
-### A) Host-Tweak einrichten (einmalig)
+### A) Set up the host tweak (once)
 
-1. `LCExtForwardHost.dylib` **und** `LCExtForward.apps` in den **globalen** Tweak-Ordner legen,
-   beide direkt im Ordner (kein Unterordner):
-   Dateien-App → „Auf meinem iPhone" → **LiveContainer → `Tweaks/`**
-   (bei Shared-Bundle/SideStore: App-Group → `LiveContainer/Tweaks/`).
-2. In LiveContainer die Tweaks **signieren** lassen (Tweak-Verwaltung).
-3. **Settings → Developer → „Tweaks selber in LiveContainer laden" einschalten.**
-4. LiveContainer **komplett neu starten** (aus dem App-Switcher schließen und neu öffnen).
-5. `LCExtForward.apps` bearbeiten – pro Zeile eine App, als **Bundle-ID** oder **`.app`-Name**:
+1. Put `LCExtForwardHost.dylib` **and** `LCExtForward.apps` into the **global** tweak folder,
+   both directly in the folder (no subfolder):
+   Files app → "On My iPhone" → **LiveContainer → `Tweaks/`**
+   (with shared bundle/SideStore: app group → `LiveContainer/Tweaks/`).
+2. Let LiveContainer **sign** the tweaks (tweak manager).
+3. **Settings → Developer → enable "Load Tweaks to Self"**
+   (`LCLoadTweaksToSelf`; German UI: „Tweaks selber in LiveContainer laden").
+4. **Fully restart** LiveContainer (close it from the app switcher and reopen it).
+5. Edit `LCExtForward.apps` – one app per line, as **bundle ID** or **`.app` name**:
    ```
    com.willfaust.madeora.app
    com.minh-ton.Reynard
    ```
-   `*` = alle Apps, `#` = Kommentar. Leere Datei = nichts wird angefasst.
+   `*` = all apps, `#` = comment. Empty file = nothing is touched.
 
-> Apps ohne Extensions oder Apps, die nicht in der Liste stehen, werden **nicht** verändert.
+> Apps without extensions, or apps not on the list, are **never** modified.
 
-### B) Pro App einrichten
+### B) Set up each app
 
-6. Die App muss in `LCExtForward.apps` stehen (Schritt 5) – **vor** dem Signieren.
-7. IPA ganz normal in LiveContainer **importieren**.
-8. `LCExtForward.dylib` in einen **per-App-Tweak-Ordner** legen, **genau dieser App zuweisen**
-   und in LiveContainer signieren.
-   → **Nicht** in den globalen Ordner legen – sonst lädt es auch in den LC-Host, wo es nichts tut.
-9. Die App in LiveContainer **einmal neu signieren**. Dabei wandelt der Host-Tweak ihre
-   Appex(es) um.
-10. App starten.
-    - **Gecko-Apps (Reynard):** Der **erste Start dauert länger** – die Frameworks
-      (XUL/GeckoView, einige hundert MB) werden einmalig in die App-Group kopiert.
-      Spätere Starts sind schnell.
+6. The app must be listed in `LCExtForward.apps` (step 5) – **before** signing.
+7. **Import** the IPA into LiveContainer as usual.
+8. Put `LCExtForward.dylib` into a **per-app tweak folder**, **assign it to exactly this app**
+   and sign it in LiveContainer.
+   → Do **not** put it into the global folder – it would also load into the LC host, where it does nothing.
+9. **Re-sign** the app in LiveContainer **once**. The host tweak converts its appex(es) during this step.
+10. Launch the app.
+    - **Gecko apps (Reynard):** the **first launch takes longer** – the frameworks
+      (XUL/GeckoView, a few hundred MB) are copied into the app group once.
+      Later launches are fast.
 
-> **Reihenfolge ist wichtig:** erst `LCExtForward.apps` eintragen, **dann** die App signieren.
-> Die Umwandlung passiert beim Signieren – steht die App vorher nicht in der Liste, wird nichts
-> umgewandelt und die Extension startet nicht. Nach jeder Änderung an der Liste die App neu signieren.
+> **Order matters:** add the app to `LCExtForward.apps` **first**, **then** sign the app.
+> The conversion happens while signing – if the app is not on the list at that point, nothing is
+> converted and the extension will not start. Re-sign the app after every change to the list.
 
 ---
 
-## Fehlersuche
+## Troubleshooting
 
-Statt `LCExtForward.dylib` die **`LCExtForward-log.dylib`** als per-App-Tweak einsetzen
-(signieren nicht vergessen) und die App einmal starten. Das Log landet im Documents-Ordner
-des App-Datencontainers:
-Dateien → LiveContainer → **Data → Application → (Container der App) → `Documents/LCExtForward.log`**.
+Use **`LCExtForward-log.dylib`** as the per-app tweak instead of `LCExtForward.dylib`
+(don't forget to sign it) and launch the app once. The log is written to the Documents folder
+of the app's data container:
+Files → LiveContainer → **Data → Application → (the app's container) → `Documents/LCExtForward.log`**.
 
-| Log-Zeile | Bedeutung |
+| Log line | Meaning |
 |---|---|
-| `forwarding … to … LiveProcess` | Weiterleitung läuft |
-| `staged Frameworks (…)` | Frameworks wurden kopiert (nur Gecko-Apps) |
-| `running com.…Helper …` | Extension läuft |
-| `dlopen … failed: … @rpath/…` | Eine Bibliothek fehlt (Frameworks nicht mitkopiert/signiert) |
-| `dlopen … sandbox blocked mmap()` | Appex wurde nicht umgewandelt → Host-Tweak/Opt-in-Liste prüfen |
+| `forwarding … to … LiveProcess` | Forwarding works |
+| `staged Frameworks (…)` | Frameworks were copied (Gecko apps only) |
+| `running com.…Helper …` | The extension is running |
+| `dlopen … failed: … @rpath/…` | A library is missing (frameworks not copied/signed) |
+| `dlopen … sandbox blocked mmap()` | The appex was not converted → check the host tweak and the opt-in list |
 
-## Grenzen
+## Limitations
 
-- Nur Extensions, die die App selbst über `NSExtension` startet. Beide Varianten werden
-  abgefangen: `…completion:` (z. B. Madeira) und `…error:` (z. B. Reynard/Gecko).
-- Jede weitergeleitete Extension läuft als `com.apple.ar.viewer` (ohne Jetsam-Speicherlimit),
-  egal was sie deklariert.
-- Storyboard-basierte Extensions (`NSExtensionMainStoryboard`) werden nicht unterstützt.
-- Getestet auf einem Gerät bisher nur mit Madeira.
+- Only extensions the app starts itself via `NSExtension`. Both variants are intercepted:
+  `…completion:` (e.g. Madeira) and `…error:` (e.g. Reynard/Gecko).
+- Every forwarded extension runs as `com.apple.ar.viewer` (without the Jetsam memory limit),
+  regardless of what it declares.
+- Storyboard-based extensions (`NSExtensionMainStoryboard`) are not supported.
+- So far only tested on a device with Madeira.
 
 ---
 
-## Technische Details
+## Technical details
 
-### Ablauf
+### How it works
 
-1. Die Guest-App ruft `+[NSExtension extensionWithIdentifier:]` mit der ID ihrer Appex auf.
-2. Das System kennt die ID nicht. Der Tweak findet die Appex in `Guest.app/PlugIns/`
-   und gibt stattdessen das `NSExtension`-Objekt von LiveProcess zurück.
-3. Beim `beginExtensionRequest…` ergänzt der Tweak die `userInfo` des ersten Items um
-   `customPayloadDylib` (sich selbst), `customPayloadEntry` und den Appex-Pfad. Die
-   Schlüssel der Guest-App (bei Madeira `endpoint`) bleiben erhalten.
-4. LiveProcess lädt den Tweak als Payload. `LCExtForwardMain` setzt die Appex als
-   `mainBundle`, lädt ihre Binary, erzeugt die `NSExtensionPrincipalClass` und ruft
-   `beginRequestWithExtensionContext:` mit dem echten Kontext auf.
+1. The guest app calls `+[NSExtension extensionWithIdentifier:]` with the ID of its appex.
+2. The system does not know that ID. The tweak finds the appex in `Guest.app/PlugIns/`
+   and returns LiveProcess's `NSExtension` object instead.
+3. On `beginExtensionRequest…`, the tweak adds `customPayloadDylib` (itself),
+   `customPayloadEntry` and the appex path to the `userInfo` of the first item. The guest
+   app's own keys (Madeira's `endpoint`) are kept.
+4. LiveProcess loads the tweak as its payload. `LCExtForwardMain` makes the appex the
+   `mainBundle`, loads its binary, creates the `NSExtensionPrincipalClass` and calls
+   `beginRequestWithExtensionContext:` with the real context.
 
-Interruption-Block, `pidForRequestIdentifier:` und `_kill:` funktionieren normal, weil
-die Guest-App ein echtes `NSExtension`-Objekt bekommt.
+The interruption block, `pidForRequestIdentifier:` and `_kill:` work normally, because
+the guest app gets a real `NSExtension` object.
 
-### Warum die App-Group?
+### Why the app group?
 
-LiveProcess darf Dateien im Guest-Ordner (LCs Documents) zwar lesen, aber nicht als
-ausführbaren Code mappen – die Sandbox blockiert dort `mmap(PROT_EXEC)`. In der App-Group
-ist das erlaubt. Der Tweak legt deshalb beim ersten Weiterleiten sich selbst und die
-komplette `.appex` unter `LiveContainer/LCExtForward/` ab; von dort lädt LiveProcess beides.
-Bookmarks für die App und ihren Datencontainer gehen mit (für das Log). Die Kopien werden
-erneuert, sobald sich Tweak oder Appex ändern.
+LiveProcess may read files in the guest folder (LC's Documents), but not map them as
+executable code – the sandbox blocks `mmap(PROT_EXEC)` there. The app group allows it.
+So on the first forward, the tweak copies itself and the complete `.appex` to
+`LiveContainer/LCExtForward/` in the app group, and LiveProcess loads both from there.
+Bookmarks for the app and its data container are passed along (for the log). The copies
+are refreshed whenever the tweak or the appex changes.
 
-Die LC-Signatur ist Teil jeder Mach-O-Datei und bleibt beim Kopieren erhalten – deshalb
-müssen Appex und Tweak vorher in LC signiert worden sein.
+The LC signature is part of every Mach-O file and survives copying – which is why the
+appex and the tweak must have been signed by LC beforehand.
 
-### Apps mit eigenen Frameworks (Reynard u. ä.)
+Staging is serialized (Gecko apps start several child processes at once) and goes through
+a `.partial` copy plus rename, so an interrupted copy never leaves a half-written bundle behind.
 
-Helfer wie Reynards Gecko-Prozess laden große Frameworks (`GeckoView.framework`, `XUL`)
-per `@rpath` relativ zum App-Bundle. Der Tweak legt deshalb eine Mini-Bundle-Struktur in
-der App-Group an:
+### Apps with their own frameworks (Reynard etc.)
+
+Helpers like Reynard's Gecko process load large frameworks (`GeckoView.framework`, `XUL`)
+via `@rpath` relative to the app bundle. The tweak therefore creates a mini bundle layout
+in the app group:
 
 ```
 <AppGroup>/LiveContainer/LCExtForward/<App>/PlugIns/<Helper>.appex
 <AppGroup>/LiveContainer/LCExtForward/<App>/Frameworks/   (XUL, GeckoView.framework, *.dylib)
 ```
 
-So löst sich `@rpath/../../Frameworks` des Helfers neben der kopierten Appex auf. Die
-Frameworks werden nur einmal kopiert (Abgleich per mtime); nach App-Update oder
-Neu-Signieren wird neu kopiert.
+This way the helper's `@rpath/../../Frameworks` resolves next to the copied appex. The
+frameworks are copied only once; a fingerprint (size + mtime of each framework binary)
+triggers a new copy after an app update or re-sign.
 
-### Host-Tweak
+### Host tweak
 
-`LCExtForwardHost.dylib` hookt im LC-**Host** den Signier-Schritt
-(`+[LCUtils signAppBundleWithZSign:]`) und wandelt jede `PlugIns/*.appex` einer
-freigeschalteten App in eine `dlopen`-bare `MH_DYLIB` um, **bevor** ZSign das Bundle
-rekursiv signiert.
+`LCExtForwardHost.dylib` hooks the signing step in the LC **host**
+(`+[LCUtils signAppBundleWithZSign:]`) and converts every `PlugIns/*.appex` of an opted-in
+app into a `dlopen`-able `MH_DYLIB` **before** ZSign signs the bundle recursively.
 
-Sicher per Default: Er tut nichts, solange eine App nicht in `LCExtForward.apps` steht.
-Apps ohne Extensions sind nie betroffen. Läuft er versehentlich in einem Guest statt im
-Host, ist er wirkungslos (Prüfung auf `LCUtils`). Bei jeder Unstimmigkeit signiert er das
-Bundle unverändert.
+Safe by default: it does nothing as long as an app is not listed in `LCExtForward.apps`.
+Apps without extensions are never affected. If it accidentally runs in a guest instead of
+the host, it has no effect (it checks for `LCUtils`). If anything looks wrong, it signs the
+bundle unchanged.
 
-### Alternative ohne Host-Tweak: `patch_appex.py`
+### Alternative without the host tweak: `patch_appex.py`
 
-Dieselbe Umwandlung (byte-identisch) geht auch vorab am Rechner:
+The same conversion (byte-identical) can be done up front on a computer:
 
 ```
 python3 patch_appex.py Madeira.ipa Madeira-lc.ipa
 ```
 
-Die gepatchte IPA dann in LiveContainer importieren und nur Teil **B** (ohne Schritt 6 und 9)
-befolgen.
+Then import the patched IPA into LiveContainer and follow only part **B** (without steps 6 and 9).
 
-## Selbst bauen
+## Building
 
-Auf macOS mit Xcode:
+On macOS with Xcode:
 
 ```
-make           # beide Dylibs, ohne Logging
-make LOG=1     # per-App-Tweak mit Logging
+make           # both dylibs, without logging
+make LOG=1     # per-app tweak with logging
 ```
 
-Releases baut GitHub Actions automatisch (`.github/workflows/release.yml`): unter
-**Actions → Release → Run workflow** eine neue Versionsnummer (z. B. `v1.0.1`) angeben.
+Releases are built automatically by GitHub Actions (`.github/workflows/release.yml`):
+go to **Actions → Release → Run workflow** and enter a new version (e.g. `v1.1.1`).

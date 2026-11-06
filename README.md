@@ -10,14 +10,13 @@ LiveContainer's `LiveProcess.appex`.
 
 ## Download
 
-Prebuilt tweaks are available under **[Releases](../../releases/latest)** (arm64, iOS 16+):
+Prebuilt files are available under **[Releases](../../releases/latest)** (arm64, iOS 16+):
 
 | File | Purpose |
 |---|---|
-| `LCExtForward.dylib` | Per-app tweak: hook in the app + payload in LiveProcess |
+| `LCExtForward.dylib` | The tweak – one dylib for everything |
 | `LCExtForward-log.dylib` | Same as above, with logging (for troubleshooting only) |
-| `LCExtForwardHost.dylib` | Host tweak: converts appexes while signing |
-| `LCExtForward.apps` | Opt-in list: which apps the host tweak handles |
+| `LCExtForward.apps` | Opt-in list: which apps the tweak handles |
 | `LCExtForward.zip` | Everything in one archive |
 
 ---
@@ -33,9 +32,9 @@ Prebuilt tweaks are available under **[Releases](../../releases/latest)** (arm64
   **"Don't Sign" must be OFF**. This applies **even with JIT**, because the extension runs
   in a separate process without JIT.
 
-### A) Set up the host tweak (once)
+### A) Install the tweak (once)
 
-1. Put `LCExtForwardHost.dylib` **and** `LCExtForward.apps` into the **global** tweak folder,
+1. Put `LCExtForward.dylib` **and** `LCExtForward.apps` into the **global** tweak folder,
    both directly in the folder (no subfolder):
    Files app → "On My iPhone" → **LiveContainer → `Tweaks/`**
    (with shared bundle/SideStore: app group → `LiveContainer/Tweaks/`).
@@ -43,48 +42,56 @@ Prebuilt tweaks are available under **[Releases](../../releases/latest)** (arm64
 3. **Settings → Developer → enable "Load Tweaks to Self"**
    (`LCLoadTweaksToSelf`; German UI: „Tweaks selber in LiveContainer laden").
 4. **Fully restart** LiveContainer (close it from the app switcher and reopen it).
-5. Edit `LCExtForward.apps` – one app per line, as **bundle ID** or **`.app` name**:
+
+### B) Add an app
+
+5. Add the app to `LCExtForward.apps` – one app per line, as **bundle ID** or **`.app` name**:
    ```
    com.willfaust.madeora.app
    com.minh-ton.Reynard
    ```
    `*` = all apps, `#` = comment. Empty file = nothing is touched.
-
-> Apps without extensions, or apps not on the list, are **never** modified.
-
-### B) Set up each app
-
-6. The app must be listed in `LCExtForward.apps` (step 5) – **before** signing.
-7. **Import** the IPA into LiveContainer as usual.
-8. Put `LCExtForward.dylib` into a **per-app tweak folder**, **assign it to exactly this app**
-   and sign it in LiveContainer.
-   → Do **not** put it into the global folder – it would also load into the LC host, where it does nothing.
-9. **Re-sign** the app in LiveContainer **once**. The host tweak converts its appex(es) during this step.
-10. Launch the app.
+6. **Import** the IPA into LiveContainer as usual, if not done yet.
+7. **Re-sign** the app in LiveContainer **once**. The tweak converts its appex(es) during this step.
+8. Launch the app.
     - **Gecko apps (Reynard):** the **first launch takes longer** – the frameworks
       (XUL/GeckoView, a few hundred MB) are copied into the app group once.
       Later launches are fast.
 
+> Apps without extensions, or apps not on the list, are **never** modified, and the tweak does
+> nothing in them.
+
 > **Order matters:** add the app to `LCExtForward.apps` **first**, **then** sign the app.
 > The conversion happens while signing – if the app is not on the list at that point, nothing is
-> converted and the extension will not start. Re-sign the app after every change to the list.
+> converted and the extension will not start.
+
+### Upgrading from 1.x
+
+1.x had two dylibs. Remove `LCExtForwardHost.dylib` from the global tweak folder and
+`LCExtForward.dylib` from every per-app tweak folder, then follow part A. Apps that were
+already converted do not need to be re-signed.
 
 ---
 
 ## Troubleshooting
 
-Use **`LCExtForward-log.dylib`** as the per-app tweak instead of `LCExtForward.dylib`
-(don't forget to sign it) and launch the app once. The log is written to the Documents folder
-of the app's data container:
-Files → LiveContainer → **Data → Application → (the app's container) → `Documents/LCExtForward.log`**.
+Put **`LCExtForward-log.dylib`** into the global tweak folder instead of `LCExtForward.dylib`
+(sign it, restart LiveContainer) and try again. It writes `LCExtForward.log` to the Documents
+folder of each data container:
+
+- **Conversion while signing:** Files → LiveContainer → `LCExtForward.log`
+- **Forwarding in the app:** Files → LiveContainer → **Data → Application → (the app's container) → `Documents/LCExtForward.log`**
 
 | Log line | Meaning |
 |---|---|
+| `host role: converting appexes …` | The tweak is loaded into LiveContainer itself |
+| `converted ….appex/…` | An appex was converted while signing |
+| `not listed in LCExtForward.apps, forwarding disabled` | Add the app to the list |
 | `forwarding … to … LiveProcess` | Forwarding works |
 | `staged Frameworks (…)` | Frameworks were copied (Gecko apps only) |
 | `running com.…Helper …` | The extension is running |
 | `dlopen … failed: … @rpath/…` | A library is missing (frameworks not copied/signed) |
-| `dlopen … sandbox blocked mmap()` | The appex was not converted → check the host tweak and the opt-in list |
+| `dlopen … sandbox blocked mmap()` | The appex was not converted → check "Load Tweaks to Self" and the list, then re-sign |
 
 ## Limitations
 
@@ -99,7 +106,20 @@ Files → LiveContainer → **Data → Application → (the app's container) →
 
 ## Technical details
 
-### How it works
+### One dylib, three roles
+
+The same `LCExtForward.dylib` is loaded into three kinds of processes and does a different job in each:
+
+| Process | How it gets there | Job |
+|---|---|---|
+| LiveContainer itself | "Load Tweaks to Self" | Converts appexes of listed apps while signing (see below) |
+| Guest app | Global tweak folder | Forwards the app's own extensions to LiveProcess |
+| LiveProcess | Copied to the app group, loaded as payload | Loads and runs the appex |
+
+In a guest app that is not on the list, the tweak only installs its hook and otherwise does
+nothing: it acts only when iOS does not know an extension the app asks for.
+
+### How forwarding works
 
 1. The guest app calls `+[NSExtension extensionWithIdentifier:]` with the ID of its appex.
 2. The system does not know that ID. The tweak finds the appex in `Guest.app/PlugIns/`
@@ -144,18 +164,17 @@ This way the helper's `@rpath/../../Frameworks` resolves next to the copied appe
 frameworks are copied only once; a fingerprint (size + mtime of each framework binary)
 triggers a new copy after an app update or re-sign.
 
-### Host tweak
+### Conversion while signing
 
-`LCExtForwardHost.dylib` hooks the signing step in the LC **host**
-(`+[LCUtils signAppBundleWithZSign:]`) and converts every `PlugIns/*.appex` of an opted-in
-app into a `dlopen`-able `MH_DYLIB` **before** ZSign signs the bundle recursively.
+In LiveContainer itself, the tweak hooks the signing step (`+[LCUtils signAppBundleWithZSign:]`)
+and converts every `PlugIns/*.appex` of a listed app into a `dlopen`-able `MH_DYLIB`
+**before** ZSign signs the bundle recursively. The list is re-read on every signing.
 
-Safe by default: it does nothing as long as an app is not listed in `LCExtForward.apps`.
-Apps without extensions are never affected. If it accidentally runs in a guest instead of
-the host, it has no effect (it checks for `LCUtils`). If anything looks wrong, it signs the
-bundle unchanged.
+Safe by default: nothing is converted as long as an app is not listed in `LCExtForward.apps`.
+Apps without extensions are never affected. The hook only exists where `LCUtils` can sign,
+i.e. in LiveContainer itself. If anything looks wrong, the bundle is signed unchanged.
 
-### Alternative without the host tweak: `patch_appex.py`
+### Alternative without "Load Tweaks to Self": `patch_appex.py`
 
 The same conversion (byte-identical) can be done up front on a computer:
 
@@ -163,16 +182,18 @@ The same conversion (byte-identical) can be done up front on a computer:
 python3 patch_appex.py Madeira.ipa Madeira-lc.ipa
 ```
 
-Then import the patched IPA into LiveContainer and follow only part **B** (without steps 6 and 9).
+Import the patched IPA, then put `LCExtForward.dylib` (without `LCExtForward.apps`) into a
+**per-app** tweak folder assigned to that app. Without a list file next to it, forwarding is
+always active for the apps the folder is assigned to.
 
 ## Building
 
 On macOS with Xcode:
 
 ```
-make           # both dylibs, without logging
-make LOG=1     # per-app tweak with logging
+make           # without logging
+make LOG=1     # with logging
 ```
 
 Releases are built automatically by GitHub Actions (`.github/workflows/release.yml`):
-go to **Actions → Release → Run workflow** and enter a new version (e.g. `v1.1.1`).
+go to **Actions → Release → Run workflow** and enter a new version (e.g. `v2.0.1`).

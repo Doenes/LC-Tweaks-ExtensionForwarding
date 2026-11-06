@@ -14,6 +14,10 @@ on:
         description: 'Release tag (e.g. v1.0.0)'
         required: true
         default: 'v1.0.0'
+      prerelease:
+        description: 'Mark as pre-release (not yet tested on a device)'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -27,17 +31,17 @@ jobs:
       - name: Build log variant
         run: |
           make clean
-          make LCExtForward.dylib LOG=1
+          make LOG=1
           mv LCExtForward.dylib LCExtForward-log.dylib
 
-      - name: Build silent dylibs
+      - name: Build silent dylib
         run: |
-          make LCExtForward.dylib LCExtForwardHost.dylib LOG=0
+          make LOG=0
 
       - name: Package
         run: |
           mkdir -p dist/LCExtForward
-          cp LCExtForward.dylib LCExtForward-log.dylib LCExtForwardHost.dylib LCExtForward.apps SETUP.md dist/LCExtForward/
+          cp LCExtForward.dylib LCExtForward-log.dylib LCExtForward.apps SETUP.md dist/LCExtForward/
           (cd dist && zip -r LCExtForward.zip LCExtForward)
           cp dist/LCExtForward/* dist/
 
@@ -48,19 +52,18 @@ jobs:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
           name: LCExtForward ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
           target_commitish: ${{ github.sha }}
+          prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease }}
           generate_release_notes: true
           body: |
             Prebuilt tweaks for LiveContainer (arm64, iOS 16+). See `SETUP.md` for setup.
 
-            - `LCExtForward.dylib` – per-app tweak (silent)
-            - `LCExtForward-log.dylib` – per-app tweak with logging (troubleshooting)
-            - `LCExtForwardHost.dylib` – host tweak (global tweak folder)
-            - `LCExtForward.apps` – opt-in list for the host tweak
+            - `LCExtForward.dylib` – the tweak (silent), for the global tweak folder
+            - `LCExtForward-log.dylib` – the same with logging (troubleshooting)
+            - `LCExtForward.apps` – opt-in list, goes next to the dylib
             - `LCExtForward.zip` – everything in one archive
           files: |
             dist/LCExtForward.dylib
             dist/LCExtForward-log.dylib
-            dist/LCExtForwardHost.dylib
             dist/LCExtForward.apps
             dist/SETUP.md
             dist/LCExtForward.zip

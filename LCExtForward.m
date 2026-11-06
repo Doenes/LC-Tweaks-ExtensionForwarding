@@ -1,13 +1,17 @@
 // LCExtForward: lets a guest app in LiveContainer start its own private app
-// extensions (e.g. Madeira's MadeiraMemoryHost) by forwarding them to
-// LiveContainer's LiveProcess.appex.
+// extensions (e.g. Madeira's MadeiraMemoryHost, Reynard's Gecko helpers) by
+// forwarding them to LiveContainer's LiveProcess.appex.
 //
-// Two roles, one dylib:
-//  1. Guest process (loaded by TweakLoader): hooks +[NSExtension
-//     extensionWithIdentifier:error:]. When the system has no extension with
-//     that identifier but the guest app has one in its PlugIns folder, it
-//     returns a proxy around LiveProcess's NSExtension instead. The proxy's
-//     -beginExtensionRequestWithInputItems:completion: adds LiveProcess's
+// One dylib, three roles. It lives in LiveContainer's GLOBAL tweak folder next
+// to the opt-in list LCExtForward.apps and is loaded into LiveContainer itself
+// ("Load Tweaks to Self"), into every guest app, and into LiveProcess:
+//  1. LiveContainer host: hooks +[LCUtils signAppBundleWithZSign:...] and turns
+//     every PlugIns/*.appex of an opted-in app into a loadable MH_DYLIB (via
+//     lcef_macho.c) before ZSign signs the bundle. Replaces patch_appex.py.
+//  2. Guest app: hooks +[NSExtension extensionWithIdentifier:error:]. When the
+//     system has no extension with that identifier but an opted-in guest app
+//     has one in its PlugIns folder, it returns a proxy around LiveProcess's
+//     NSExtension instead. The proxy's begin-request methods add LiveProcess's
 //     custom-payload keys to the first item's userInfo (the guest's own keys,
 //     such as Madeira's "endpoint", stay as they are); every other message
 //     goes to the real extension.
@@ -15,17 +19,20 @@
 //     the request's bookmarks, so the payload is a copy of this dylib in the
 //     app group, and the request carries bookmarks for the guest app and its
 //     data container.
-//  2. LiveProcess (loaded as customPayloadDylib): LCExtForwardMain loads the
+//  3. LiveProcess (loaded as customPayloadDylib): LCExtForwardMain loads the
 //     guest appex, makes it the main bundle, creates its
 //     NSExtensionPrincipalClass and hands it LiveProcess's extension context.
 //
-// Log: <guest data container>/Documents/LCExtForward.log (both roles), and NSLog.
+// Opt-in: LCExtForward.apps next to this dylib (bundle ID or .app name per
+// line, "*" = all, "#" comments). Without the file, the host role converts
+// nothing, and the guest role is active (per-app tweak folder, as in 1.x).
+//
+// Log (build with LOG=1): <data container>/Documents/LCExtForward.log, and NSLog.
+// For the host role that is LiveContainer's own Documents folder.
 //
 // Limits: only extensions the guest starts itself through NSExtension. All of
 // them run on LiveProcess's extension point (com.apple.ar.viewer). Storyboard
-// based extensions (NSExtensionMainStoryboard) are not supported. The appex
-// executable must be dlopen-able: LCExtForwardHost.dylib converts it when
-// LiveContainer signs the app (or run patch_appex.py on the IPA first). The
+// based extensions (NSExtensionMainStoryboard) are not supported. The
 // LiveProcess side runs without JIT, so this dylib and the appex must be signed
 // with LiveContainer's certificate even when the guest app itself uses JIT.
 
@@ -33,6 +40,7 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #import <stdio.h>
+#import "lcef_macho.h"
 
 static NSString *const kAppexPathKey = @"LCExtForwardAppexPath";
 static NSString *const kLogPathKey = @"LCExtForwardLogPath";
@@ -346,6 +354,78 @@ static NSString *LCEFLiveProcessIdentifier(void) {
     return nil;
 }
 
+#pragma mark - Opt-in list
+
+/// LCExtForward.apps next to this dylib (the global tweak folder). Located via
+/// our own load path: TweakLoader unsets LC_GLOBAL_TWEAKS_FOLDER before loading
+/// tweaks, so the environment variable is only a fallback.
+/// Returns nil when there is no list file, else the entries (maybe empty).
+static NSSet<NSString *> *LCEFLoadOptIn(BOOL *all) {
+    *all = NO;
+    NSString *selfPath = LCEFSelfPath();
+    NSString *file = selfPath ? [selfPath.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"LCExtForward.apps"] : nil;
+    NSString *text = file ? [NSString stringWithContentsOfFile:file encoding:NSUTF8StringEncoding error:nil] : nil;
+    if (!text) {
+        const char *env = getenv("LC_GLOBAL_TWEAKS_FOLDER");
+        if (env) text = [NSString stringWithContentsOfFile:[@(env) stringByAppendingPathComponent:@"LCExtForward.apps"]
+                                                  encoding:NSUTF8StringEncoding error:nil];
+    }
+    if (!text) return nil;
+    NSMutableSet *set = [NSMutableSet set];
+    for (NSString *raw in [text componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
+        NSString *line = [raw stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+        if (!line.length || [line hasPrefix:@"#"]) continue;
+        if ([line isEqualToString:@"*"]) { *all = YES; continue; }
+        [set addObject:line];
+    }
+    return set;
+}
+
+/// Whether the .app at `bundlePath` is on the list: by .app name or by the
+/// CFBundleIdentifier in its Info.plist (not NSBundle.mainBundle, which may
+/// carry LiveContainer's ID with "use LC bundle ID").
+static BOOL LCEFListContains(NSSet<NSString *> *list, BOOL all, NSString *bundlePath) {
+    if (all) return YES;
+    if (!list.count || !bundlePath) return NO;
+    NSString *appName = bundlePath.lastPathComponent.stringByDeletingPathExtension;
+    NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:[bundlePath stringByAppendingPathComponent:@"Info.plist"]];
+    NSString *bid = [info[@"CFBundleIdentifier"] isKindOfClass:NSString.class] ? info[@"CFBundleIdentifier"] : nil;
+    for (NSString *want in list) {
+        // Try the entry as written AND without a trailing ".app": the ".app" may be
+        // a stray bundle extension ("Reynard.app") or part of the bundle ID itself
+        // ("com.willfaust.madeora.app").
+        NSString *stripped = [want hasSuffix:@".app"] ? [want substringToIndex:want.length - 4] : want;
+        for (NSString *w in @[want, stripped]) {
+            if (!w.length) continue;
+            if ([w caseInsensitiveCompare:appName] == NSOrderedSame) return YES;
+            if (!bid) continue;
+            if ([w isEqualToString:bid]) return YES;
+            // Last components of the ID ("Reynard" for "com.minh-ton.Reynard"), only on a
+            // dot boundary so short entries do not match unrelated apps.
+            if ([bid hasSuffix:[@"." stringByAppendingString:w]]) return YES;
+        }
+    }
+    return NO;
+}
+
+/// Guest role gate, decided once per process. With a list file (global tweak
+/// folder) only listed apps are forwarded; without one the dylib sits in a
+/// per-app tweak folder that the user assigned on purpose, so it is active.
+static BOOL LCEFGuestOptedIn(void) {
+    static BOOL optedIn;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        BOOL all = NO;
+        NSSet *list = LCEFLoadOptIn(&all);
+        optedIn = !list || LCEFListContains(list, all, LCEFGuestAppPath());
+        LOG(@"%@: %@", LCEFGuestAppPath().lastPathComponent,
+            !list ? @"no LCExtForward.apps next to the dylib, forwarding enabled"
+                  : optedIn ? @"listed in LCExtForward.apps, forwarding enabled"
+                            : @"not listed in LCExtForward.apps, forwarding disabled");
+    });
+    return optedIn;
+}
+
 #pragma mark - Guest side
 
 static NSString *gSelfPath;      // where TweakLoader loaded this dylib from
@@ -449,6 +529,7 @@ static id (*orig_extensionWithIdentifier)(id, SEL, NSString *, NSError **);
 static id hook_extensionWithIdentifier(id self, SEL _cmd, NSString *identifier, NSError **error) {
     id extension = orig_extensionWithIdentifier(self, _cmd, identifier, error);
     if (extension || ![identifier isKindOfClass:NSString.class]) return extension;
+    if (!LCEFGuestOptedIn()) return nil;
 
     NSString *appex = LCEFFindGuestAppex(identifier);
     if (!appex) {
@@ -478,13 +559,7 @@ static id hook_extensionWithIdentifier(id self, SEL _cmd, NSString *identifier, 
     return [[LCEFExtensionProxy alloc] initWithExtension:extension appex:appex];
 }
 
-__attribute__((constructor)) static void LCEFInstallHooks(void) {
-#if LCEF_LOG
-    // In the guest, HOME is the app's data container (visible in Files under LiveContainer).
-    const char *home = getenv("HOME");
-    gLogPath = [(home ? @(home) : NSHomeDirectory()) stringByAppendingPathComponent:@"Documents/LCExtForward.log"];
-#endif
-    gSelfPath = LCEFSelfPath();
+static void LCEFInstallGuestHook(void) {
     Class extensionClass = NSClassFromString(@"NSExtension");
     Method classMethod = class_getClassMethod(extensionClass, @selector(extensionWithIdentifier:error:));
     if (!classMethod) {
@@ -492,6 +567,80 @@ __attribute__((constructor)) static void LCEFInstallHooks(void) {
         return;
     }
     orig_extensionWithIdentifier = (void *)method_setImplementation(classMethod, (IMP)hook_extensionWithIdentifier);
+}
+
+#pragma mark - Host side (LiveContainer itself)
+
+@protocol LCEFHostUtils
++ (NSProgress *)signAppBundleWithZSign:(NSURL *)path completionHandler:(void (^)(BOOL success, NSError *error))completionHandler;
+@end
+
+#if LCEF_LOG
+static void LCEFMachoLog(const char *msg) { LOG(@"%s", msg); }
+#endif
+
+static NSUInteger LCEFConvertAppexes(NSURL *bundleURL) {
+    NSURL *plugIns = [bundleURL URLByAppendingPathComponent:@"PlugIns"];
+    NSArray<NSURL *> *entries = [NSFileManager.defaultManager contentsOfDirectoryAtURL:plugIns
+        includingPropertiesForKeys:nil options:0 error:nil];
+    NSUInteger n = 0;
+    for (NSURL *appex in entries) {
+        if (![appex.pathExtension isEqualToString:@"appex"]) continue;
+        NSDictionary *info = [NSDictionary dictionaryWithContentsOfURL:[appex URLByAppendingPathComponent:@"Info.plist"]];
+        NSString *exec = info[@"CFBundleExecutable"];
+        if (![exec isKindOfClass:NSString.class]) continue;
+        NSString *execPath = [appex URLByAppendingPathComponent:exec].path;
+        if (lcef_patch_file(execPath.fileSystemRepresentation)) {
+            n++;
+            LOG(@"converted %@/%@", appex.lastPathComponent, exec);
+        }
+    }
+    return n;
+}
+
+static NSProgress *(*orig_sign)(id, SEL, NSURL *, void (^)(BOOL, NSError *));
+static NSProgress *hook_sign(id self, SEL _cmd, NSURL *path, void (^completion)(BOOL, NSError *)) {
+    @try {
+        BOOL all = NO;
+        NSSet *list = LCEFLoadOptIn(&all);   // re-read on every sign, so edits apply without a restart
+        if (path && LCEFListContains(list, all, path.path)) {
+            NSUInteger n = LCEFConvertAppexes(path);
+            (void)n;
+            LOG(@"%@: %lu appex(es) converted before signing", path.lastPathComponent, (unsigned long)n);
+        }
+    } @catch (NSException *e) {
+        (void)e;
+        LOG(@"conversion skipped (%@), signing the bundle unchanged", e.reason);
+    }
+    return orig_sign(self, _cmd, path, completion);   // ZSign signs the whole bundle, converted appexes included
+}
+
+/// Only LiveContainer's own process has LCUtils' signing method; in a guest or
+/// in LiveProcess this does nothing. Even if it were hooked there, the hook
+/// only runs when LiveContainer signs an app.
+static void LCEFInstallHostHook(void) {
+    Class utils = NSClassFromString(@"LCUtils");
+    Method m = utils ? class_getClassMethod(utils, @selector(signAppBundleWithZSign:completionHandler:)) : NULL;
+    if (!m) return;
+#if LCEF_LOG
+    lcef_macho_log = LCEFMachoLog;
+#endif
+    orig_sign = (void *)method_setImplementation(m, (IMP)hook_sign);
+    LOG(@"host role: converting appexes of opted-in apps when LiveContainer signs them");
+}
+
+#pragma mark - Setup
+
+__attribute__((constructor)) static void LCEFInstall(void) {
+#if LCEF_LOG
+    // HOME is the data container: the guest's (visible in Files under LiveContainer),
+    // or LiveContainer's own for the host role.
+    const char *home = getenv("HOME");
+    gLogPath = [(home ? @(home) : NSHomeDirectory()) stringByAppendingPathComponent:@"Documents/LCExtForward.log"];
+#endif
+    gSelfPath = LCEFSelfPath();
+    LCEFInstallHostHook();
+    LCEFInstallGuestHook();
     LOG(@"loaded in %@ (%@) from %@, plugins: %@", NSBundle.mainBundle.bundleIdentifier, LCEFGuestAppPath().lastPathComponent,
         gSelfPath, [NSFileManager.defaultManager contentsOfDirectoryAtPath:LCEFPlugInsPath() error:nil]);
 }

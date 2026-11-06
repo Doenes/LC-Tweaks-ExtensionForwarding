@@ -1,9 +1,9 @@
-# LCExtForwardHost opt-in list.
-# Put this file next to LCExtForwardHost.dylib in LiveContainer's GLOBAL tweak folder.
+# LCExtForward opt-in list.
+# Put this file next to LCExtForward.dylib in LiveContainer's GLOBAL tweak folder.
 # One app per line: either the .app name or its CFBundleIdentifier. "*" = all apps.
-# Lines starting with # are ignored. Empty file / no file = nothing is converted.
-# After changing this list, re-sign the app in LiveContainer once.
+# Lines starting with # are ignored. Empty file = nothing is converted or forwarded.
+# After adding an app, re-sign it in LiveContainer once.
 
 com.willfaust.madeora.app
 com.minh-ton.Reynard
-# Tip: the .app name works too (e.g. "Reynard"), and "*" = all apps.
+# Tip: the .app name works too (e.g. "Reynard").

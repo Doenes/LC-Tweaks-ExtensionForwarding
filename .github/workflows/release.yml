@@ -14,6 +14,10 @@ on:
         description: 'Release tag (e.g. v1.0.0)'
         required: true
         default: 'v1.0.0'
+      replace:
+        description: 'Delete an existing release/tag with this name first (rebuild it)'
+        type: boolean
+        default: false
       prerelease:
         description: 'Mark as pre-release (not yet tested on a device)'
         type: boolean
@@ -44,6 +48,13 @@ jobs:
           cp LCExtForward.dylib LCExtForward-log.dylib LCExtForward.apps SETUP.md dist/LCExtForward/
           (cd dist && zip -r LCExtForward.zip LCExtForward)
           cp dist/LCExtForward/* dist/
+
+      - name: Delete existing release
+        if: github.event_name == 'workflow_dispatch' && inputs.replace
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.version }}
+        run: gh release delete "$TAG" --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" || echo "no release $TAG to delete"
 
       - name: Publish release
         if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')

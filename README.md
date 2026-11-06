@@ -45,12 +45,17 @@ Prebuilt files are available under **[Releases](../../releases/latest)** (arm64,
 
 ### B) Add an app
 
-5. Add the app to `LCExtForward.apps` – one app per line, as **bundle ID** or **`.app` name**:
-   ```
-   com.willfaust.madeora.app
-   com.minh-ton.Reynard
-   ```
+5. Add the app to `LCExtForward.apps` – one app per line, as **bundle ID** or **`.app` name**.
    `*` = all apps, `#` = comment. Empty file = nothing is touched.
+   These apps are **already listed** in the shipped file:
+
+   | App | Bundle ID |
+   |---|---|
+   | Madeira | `com.willfaust.madeora.app` |
+   | Reynard | `com.minh-ton.Reynard` |
+   | MeloNX | `com.stossy11.MeloNX` |
+
+   For these, step 5 is already done – just import and re-sign them.
 6. **Import** the IPA into LiveContainer as usual, if not done yet.
 7. **Re-sign** the app in LiveContainer **once**. The tweak converts its appex(es) during this step.
 8. Launch the app.
